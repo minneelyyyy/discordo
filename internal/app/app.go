@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/ayn2op/discordo/internal/clipboard"
 	"github.com/ayn2op/discordo/internal/config"
 	"github.com/ayn2op/discordo/internal/consts"
 	"github.com/ayn2op/discordo/internal/keyring"
+	"github.com/ayn2op/discordo/internal/ui/accounts"
 	"github.com/ayn2op/discordo/internal/ui/chat"
 	"github.com/ayn2op/discordo/internal/ui/login"
 	"github.com/ayn2op/tview"
+	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/gdamore/tcell/v3"
 )
 
@@ -37,15 +40,6 @@ func New(cfg *config.Config) *App {
 }
 
 func (a *App) Run() error {
-	token := os.Getenv("DISCORDO_TOKEN")
-	if token == "" {
-		t, err := keyring.GetToken()
-		if err != nil {
-			slog.Info("failed to retrieve token from keyring", "err", err)
-		}
-		token = t
-	}
-
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return fmt.Errorf("failed to create screen: %w", err)
@@ -64,16 +58,72 @@ func (a *App) Run() error {
 	screen.EnableFocus()
 	a.inner.SetScreen(screen)
 
-	if token == "" {
-		loginForm := login.NewForm(a.inner, a.cfg, func(token string) {
-			if err := a.showChatView(token); err != nil {
-				slog.Error("failed to show chat view", "err", err)
+	tokenEnv := os.Getenv("DISCORDO_TOKEN")
+	if tokenEnv == "" {
+		accs, err := keyring.GetAccounts()
+		if err != nil {
+			slog.Info("failed to retrieve tokens from keyring", "err", err)
+		}
+
+		if len(accs) > 0 {
+			users := make([]accounts.AcctInfo, len(accs))
+
+			for _, acc := range accs {
+				client := api.NewClient(acc.Token)
+				user, err := client.Me()
+				if err != nil {
+					continue
+				}
+
+				users = append(users, accounts.AcctInfo{
+					User:  user,
+					Token: acc.Token,
+				})
 			}
-		})
-		a.inner.SetRoot(loginForm)
+
+			accountsForm := accounts.NewForm(a.inner, a.cfg, users, func(token string) {
+				if err := a.showChatView(token); err != nil {
+					slog.Error("failed to show chat view", "err", err)
+				}
+			})
+			a.inner.SetRoot(accountsForm)
+		} else {
+			loginForm := login.NewForm(a.inner, a.cfg, func(token string) {
+				if err := a.showChatView(token); err != nil {
+					slog.Error("failed to show chat view", "err", err)
+				}
+			})
+			a.inner.SetRoot(loginForm)
+		}
 	} else {
-		if err := a.showChatView(token); err != nil {
-			return err
+		tokens := strings.Split(tokenEnv, ",")
+
+		if len(tokens) == 1 {
+			if err := a.showChatView(tokens[0]); err != nil {
+				return err
+			}
+		} else {
+			users := make([]accounts.AcctInfo, len(tokens))
+
+			for _, token := range tokens {
+				client := api.NewClient(token)
+				user, err := client.Me()
+				if err != nil {
+					continue
+				}
+
+				users = append(users, accounts.AcctInfo{
+					User:  user,
+					Token: token,
+				})
+			}
+
+			accountsForm := accounts.NewForm(a.inner, a.cfg, users, func(token string) {
+				if err := a.showChatView(token); err != nil {
+					slog.Error("failed to show chat view", "err", err)
+				}
+			})
+			a.inner.SetRoot(accountsForm)
 		}
 	}
 

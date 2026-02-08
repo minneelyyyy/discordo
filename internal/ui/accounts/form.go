@@ -1,14 +1,14 @@
-package login
+package accounts
 
 import (
-	"errors"
 	"log/slog"
 
 	"github.com/ayn2op/tview/layers"
+	"github.com/diamondburned/arikawa/v3/api"
+	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/gdamore/tcell/v3"
 
 	"github.com/ayn2op/discordo/internal/config"
-	"github.com/ayn2op/discordo/internal/http"
 	"github.com/ayn2op/discordo/internal/keyring"
 	"github.com/ayn2op/discordo/internal/ui"
 	"github.com/ayn2op/tview"
@@ -18,7 +18,6 @@ import (
 const (
 	formLayerName  = "form"
 	errorLayerName = "error"
-	qrLayerName    = "qr"
 )
 
 type DoneFn = func(token string)
@@ -31,7 +30,12 @@ type Form struct {
 	done DoneFn
 }
 
-func NewForm(app *tview.Application, cfg *config.Config, done DoneFn) *Form {
+type AcctInfo struct {
+	User  *discord.User
+	Token string
+}
+
+func NewForm(app *tview.Application, cfg *config.Config, accts []AcctInfo, done DoneFn) *Form {
 	f := &Form{
 		Layers: layers.New(),
 		app:    app,
@@ -40,47 +44,40 @@ func NewForm(app *tview.Application, cfg *config.Config, done DoneFn) *Form {
 		done:   done,
 	}
 
+	for _, acct := range accts {
+		token := acct.Token
+
+		client := api.NewClient(token)
+		user, err := client.Me()
+		if err != nil {
+			continue
+		}
+
+		f.form.AddButton(user.Username, func() {
+			account := keyring.AccountInfo{
+				Id:    user.ID,
+				Token: token,
+			}
+
+			f.login(account)
+		})
+	}
+
 	f.form.
-		AddPasswordField("Token", "", 0, 0, nil).
-		AddButton("Login", f.login).
-		AddButton("Login with QR", f.loginWithQR)
+		AddButton("New Account", f.addAccount)
+
 	f.SetBackgroundLayerStyle(f.cfg.Theme.Dialog.BackgroundStyle.Style)
 	f.AddLayer(f.form, layers.WithName(formLayerName), layers.WithResize(true), layers.WithVisible(true))
 	return f
 }
 
-func (f *Form) addTokenToKeyring(token string) error {
-	client := http.NewClient(token)
-
-	user, err := client.Me()
-	if err != nil {
-		slog.Info("Failed client.Me()", "error", err)
-		return err
+func (f *Form) login(account keyring.AccountInfo) {
+	if f.done != nil {
+		f.done(account.Token)
 	}
-
-	if err := keyring.SetToken(user.ID, token); err != nil {
-		slog.Info("Failed to set keyring", "error", err)
-		return err
-	}
-
-	return nil
 }
 
-func (f *Form) login() {
-	token := f.form.GetFormItem(0).(*tview.InputField).GetText()
-	if token == "" {
-		f.onError(errors.New("token required"))
-		return
-	}
-
-	if err := f.addTokenToKeyring(token); err != nil {
-		f.onError(err)
-		return
-	}
-
-	if f.done != nil {
-		f.done(token)
-	}
+func (f *Form) addAccount() {
 }
 
 func (f *Form) onError(err error) {
@@ -122,31 +119,4 @@ func (f *Form) onError(err error) {
 			layers.WithOverlay(),
 		).
 		SendToFront(errorLayerName)
-}
-
-func (f *Form) loginWithQR() {
-	qr := newQRLogin(f.app, f.cfg, func(token string, err error) {
-		if err != nil {
-			f.onError(err)
-			return
-		}
-
-		if token == "" {
-			f.RemoveLayer(qrLayerName)
-			return
-		}
-
-		if err := f.addTokenToKeyring(token); err != nil {
-			f.onError(err)
-			return
-		}
-
-		f.RemoveLayer(qrLayerName)
-		if f.done != nil {
-			f.done(token)
-		}
-	})
-
-	f.AddLayer(qr, layers.WithName(qrLayerName), layers.WithResize(true), layers.WithVisible(true))
-	qr.start()
 }
